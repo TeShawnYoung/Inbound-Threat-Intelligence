@@ -1,1 +1,144 @@
+{
+   "version": "Notebook/1.0",
+   "items": [
+       {
+           "type": 1,
+           "content": {
+               "json": "# 🚨 Allowed Inbound Flows from Threat-Intel IPs\n\nCorrelates our **accepted inbound traffic** (`NTANetAnalytics`, any `FlowType`, `AllowedInFlows > 0`) against the **live threat-intel feed** (`ThreatIntelIndicators`). Each bubble is an external IP that is *both* on our TI watchlist **and** successfully sent traffic our network let in — the intersection worth investigating.\n\n**Bubble size = allowed inbound flows; color = bytes received (data volume that moved).** `Targets` = how many internal hosts it reached.\n\n> TI list is deduped (`arg_max by Id`), active-only, and coalesces the IP observable keys. Only sources the geo DB resolves to a **city + country** are shown. Enriched with `geo_info_from_ip_address()`."
+           },
+           "name": "header",
+           "id": "1a2b3c4d-0001-4a00-9000-000000000001"
+       },
+       {
+           "type": 9,
+           "content": {
+               "version": "KqlParameterItem/1.0",
+               "parameters": [
+                   {
+                       "id": "tr",
+                       "version": "KqlParameterItem/1.0",
+                       "name": "TimeRange",
+                       "label": "Time range",
+                       "type": 4,
+                       "isRequired": true,
+                       "value": {
+                           "durationMs": 2592000000
+                       },
+                       "typeSettings": {
+                           "selectableValues": [
+                               {
+                                   "durationMs": 3600000
+                               },
+                               {
+                                   "durationMs": 14400000
+                               },
+                               {
+                                   "durationMs": 43200000
+                               },
+                               {
+                                   "durationMs": 86400000
+                               },
+                               {
+                                   "durationMs": 604800000
+                               },
+                               {
+                                   "durationMs": 2592000000
+                               }
+                           ]
+                       }
+                   }
+               ],
+               "style": "pills"
+           },
+           "name": "parameters",
+           "id": "1a2b3c4d-0002-4a00-9000-000000000002"
+       },
+       {
+           "type": 1,
+           "content": {
+               "json": "## Threat-intel-matched allowed inbound — `NTANetAnalytics` ⋈ `ThreatIntelIndicators`\n\nUnlike a raw malicious-flow map (which just re-displays a verdict), this joins **two independent sources**: your own accepted-traffic logs and your TI feed. A hit means a known-bad IP **got in**, not merely that it knocked."
+           },
+           "name": "text-ti",
+           "id": "1a2b3c4d-0003-4a00-9000-000000000003"
+       },
+       {
+           "type": 3,
+           "content": {
+               "version": "KqlItem/1.0",
+               "query": "// === Allowed inbound flows from known TI-listed IPs ===\n// Joins our ACCEPTED inbound traffic against the live threat-intel feed.\n// A bubble = a threat-intel-listed external IP whose traffic we LET IN.\n// 1) Build a deduped, active TI IP watchlist (coalescing the IP observable keys).\nlet TI_IPs =\n    ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | summarize arg_max(TimeGenerated, *) by Id        // dedup re-ingested indicators\n    | where IsActive == true\n    | where isempty(ValidUntil) or ValidUntil > now()  // not expired\n    | where ObservableKey in (\"ipv4-addr:value\",\n                              \"network-traffic:src_ref.value\",\n                              \"network-traffic:dst_ref.value\")\n    | extend ThreatType = tostring(Data.indicator_types[0])\n    | project TI_IP = ObservableValue, Confidence, ThreatType, Tags\n    | where isnotempty(TI_IP);\n// 2) Our actual ALLOWED inbound flows (any FlowType), keyed on external source IP.\nNTANetAnalytics\n| where TimeGenerated {TimeRange}\n| where SubType == \"FlowLog\"\n| where AllowedInFlows > 0          // it got IN - not denied\n| where isnotempty(SrcIp)\n// 3) Match source IP against the TI watchlist.\n| join kind=inner TI_IPs on $left.SrcIp == $right.TI_IP\n// 4) Geo-enrich the matched hostile source.\n| extend geo = geo_info_from_ip_address(SrcIp)\n| extend Latitude  = toreal(geo.latitude),\n         Longitude = toreal(geo.longitude),\n         Country   = tostring(geo.country),\n         State     = tostring(geo.state),\n         City      = tostring(geo.city)\n// Only keep sources the geo DB placed to a city + country.\n| where isnotempty(City) and isnotempty(Country)\n| where isnotempty(Latitude) and isnotempty(Longitude)\n// 5) One bubble per hostile source that got in.\n| summarize AllowedFlows  = sum(AllowedInFlows),\n            DeniedFlows   = sum(DeniedInFlows),\n            BytesIn       = sum(BytesSrcToDest),\n            Targets       = dcount(DestIp),\n            Ports         = make_set(DestPort, 15),\n            MaxConfidence = max(Confidence),\n            ThreatTypes   = make_set(ThreatType, 10)\n         by SrcIp, Country, State, City, Latitude, Longitude\n| extend MapLabel = strcat(SrcIp, \" (\", City, \", \", State, \", \", Country, \") - \", AllowedFlows, \" allowed, \", Targets, \" targets\")\n| project Latitude, Longitude, MapLabel, AllowedFlows, DeniedFlows, BytesIn, Targets, Ports, MaxConfidence, ThreatTypes, SrcIp, Country, State, City\n| order by AllowedFlows desc, Targets desc",
+               "size": 0,
+               "title": "Allowed inbound from TI-listed IPs — bubble size = allowed flows, color = bytes in",
+               "timeContextFromParameter": "TimeRange",
+               "queryType": 0,
+               "resourceType": "microsoft.operationalinsights/workspaces",
+               "visualization": "map",
+               "mapSettings": {
+                   "locInfo": "LatLong",
+                   "latitude": "Latitude",
+                   "longitude": "Longitude",
+                   "sizeSettings": "AllowedFlows",
+                   "sizeAggregation": "Sum",
+                   "labelSettings": "MapLabel",
+                   "legendMetric": "AllowedFlows",
+                   "legendAggregation": "Sum",
+                   "legendColor": "BytesIn",
+                   "itemColorSettings": {
+                       "nodeColorField": "AllowedFlows",
+                       "colorAggregation": "Sum",
+                       "type": "heatmap",
+                       "heatmapPalette": "greenRed"
+                   }
+               },
+               "crossComponentResources": [
+                   "/subscriptions/3c95e63a-895a-4386-991e-edbbf57de5c8/resourceGroups/cyber-range-admin-soc/providers/Microsoft.OperationalInsights/workspaces/LAW-Cyber-Range"
+               ]
+           },
+           "name": "map-ti",
+           "id": "1a2b3c4d-0004-4a00-9000-000000000004"
+       },
+       {
+           "type": 3,
+           "content": {
+               "version": "KqlItem/1.0",
+               "query": "// Companion grid: same TI-matched allowed-inbound sources, ranked, with the\n// threat-intel context (confidence, threat type) carried alongside the traffic.\nlet TI_IPs =\n    ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | summarize arg_max(TimeGenerated, *) by Id\n    | where IsActive == true\n    | where isempty(ValidUntil) or ValidUntil > now()\n    | where ObservableKey in (\"ipv4-addr:value\",\n                              \"network-traffic:src_ref.value\",\n                              \"network-traffic:dst_ref.value\")\n    | extend ThreatType = tostring(Data.indicator_types[0])\n    | project TI_IP = ObservableValue, Confidence, ThreatType, Tags\n    | where isnotempty(TI_IP);\nNTANetAnalytics\n| where TimeGenerated {TimeRange}\n| where SubType == \"FlowLog\"\n| where AllowedInFlows > 0\n| where isnotempty(SrcIp)\n| join kind=inner TI_IPs on $left.SrcIp == $right.TI_IP\n| extend geo = geo_info_from_ip_address(SrcIp)\n| extend Country = tostring(geo.country),\n         State   = tostring(geo.state),\n         City    = tostring(geo.city)\n// Only keep sources the geo DB placed to a city + country.\n| where isnotempty(City) and isnotempty(Country)\n| summarize AllowedFlows  = sum(AllowedInFlows),\n            DeniedFlows   = sum(DeniedInFlows),\n            BytesIn       = sum(BytesSrcToDest),\n            Targets       = dcount(DestIp),\n            Ports         = make_set(DestPort, 15),\n            MaxConfidence = max(Confidence),\n            ThreatTypes   = make_set(ThreatType, 10),\n            Tags          = make_set(Tags, 10)\n         by SrcIp, Country, State, City\n| order by AllowedFlows desc, Targets desc",
+               "size": 0,
+               "title": "TI-matched source breakdown (allowed/denied flows, bytes, confidence, threat type, fan-out)",
+               "timeContextFromParameter": "TimeRange",
+               "queryType": 0,
+               "resourceType": "microsoft.operationalinsights/workspaces",
+               "visualization": "table",
+               "gridSettings": {
+                   "formatters": [
+                       {
+                           "columnMatch": "BytesIn",
+                           "formatter": 4,
+                           "formatOptions": {
+                               "palette": "red"
+                           }
+                       },
+                       {
+                           "columnMatch": "AllowedFlows",
+                           "formatter": 4,
+                           "formatOptions": {
+                               "palette": "red"
+                           }
+                       }
+                   ]
+               },
+               "crossComponentResources": [
+                   "/subscriptions/3c95e63a-895a-4386-991e-edbbf57de5c8/resourceGroups/cyber-range-admin-soc/providers/Microsoft.OperationalInsights/workspaces/LAW-Cyber-Range"
+               ]
+           },
+           "name": "grid-ti",
+           "id": "1a2b3c4d-0005-4a00-9000-000000000005"
+       }
+   ],
+   "fallbackResourceIds": [
+       "/subscriptions/3c95e63a-895a-4386-991e-edbbf57de5c8/resourcegroups/cyber-range-admin-soc/providers/microsoft.operationalinsights/workspaces/law-cyber-range"
+   ],
+   "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json",
+   "context": {
+       "ownerId": "/subscriptions/3c95e63a-895a-4386-991e-edbbf57de5c8/resourceGroups/cyber-range-admin-soc/providers/Microsoft.OperationalInsights/workspaces/LAW-Cyber-Range"
+   }
+}
 
