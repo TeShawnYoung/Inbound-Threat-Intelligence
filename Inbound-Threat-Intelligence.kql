@@ -1,1 +1,37 @@
+let TI_IPs =
+   ThreatIntelIndicators
+   | where TimeGenerated > ago(30d)
+   | summarize arg_max(TimeGenerated, *) by Id
+   | where IsActive == true
+   | where isempty(ValidUntil) or ValidUntil > now()
+   | where ObservableKey in ("ipv4-addr:value",
+                             "network-traffic:src_ref.value",
+                             "network-traffic:dst_ref.value")
+   | extend ThreatType = tostring(Data.indicator_types[0])
+   | project TI_IP = ObservableValue, Confidence, ThreatType, Tags
+   | where isnotempty(TI_IP);
+NTANetAnalytics
+| where SubType == "FlowLog"
+| where AllowedInFlows > 0
+| where isnotempty(SrcIp)
+| join kind=inner TI_IPs on $left.SrcIp == $right.TI_IP
+| extend geo = geo_info_from_ip_address(SrcIp)
+| extend Latitude  = toreal(geo.latitude),
+        Longitude = toreal(geo.longitude),
+        Country   = tostring(geo.country),
+        State     = tostring(geo.state),
+        City      = tostring(geo.city)
+| where isnotempty(City) and isnotempty(Country)
+| where isnotempty(Latitude) and isnotempty(Longitude)
+| summarize AllowedFlows  = sum(AllowedInFlows),
+           DeniedFlows   = sum(DeniedInFlows),
+           BytesIn       = sum(BytesSrcToDest),
+           Targets       = dcount(DestIp),
+           Ports         = make_set(DestPort, 15),
+           MaxConfidence = max(Confidence),
+           ThreatTypes   = make_set(ThreatType, 10)
+        by SrcIp, Country, State, City, Latitude, Longitude
+| extend MapLabel = strcat(SrcIp, " (", City, ", ", State, ", ", Country, ") - ", AllowedFlows, " allowed, ", Targets, " targets")
+| project Latitude, Longitude, MapLabel, AllowedFlows, DeniedFlows, BytesIn, Targets, Ports, MaxConfidence, ThreatTypes, SrcIp, Country, State, City
+| order by AllowedFlows desc, Targets desc
 
